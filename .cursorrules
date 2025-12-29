@@ -1,0 +1,102 @@
+# Cursor rules
+
+## I. Diagram and Flow Constraints
+
+- **Sequence Diagrams:** When you need to draw a **sequence diagram**, please generate it using an **SVG image** and store it, instead of printing it out as text.
+
+- **Asynchronous Operations:** If an **asynchronous function or operation** is involved, and the logic is complicated, please consider drawing a corresponding **sequence diagram**.
+
+- **Complicated Algorithms:**
+
+  - For complex algorithms, it is best to draw a **flowchart** (the flowchart can be drawn in text) within a **separate Markdown file**, along with a detailed description.
+  
+  - **Furthermore, it is recommended to provide a step-by-step example** of how to run this algorithm.
+
+---
+
+## II. Command Line and Environment Constraints
+
+- **Terminal Environment:**
+
+  - The typical terminal environment is **Windows PowerShell**. Therefore, when generating and executing **command lines**, pay special attention to the correct syntax.
+  
+  - For example, the **`&&` operator is not allowed in PowerShell**.
+
+---
+
+## III. Markdown File Generation Constraints
+
+- **Markdown File Generation:**
+
+  - **Do not generate too many Markdown files**, especially for code changes or refactoring.
+  
+  - Only generate `.md` files in the following situations:
+  
+    - When you write a script as a tool, it is acceptable to create a `.md` manual for it.
+    
+    - When a complex algorithm requires a flowchart and description file (as mentioned above).
+
+---
+
+## IV. Important Code Generation Requirements ⚠️
+
+- **Version Checking:**
+
+  - Always check the version of the compiler and libraries (e.g., C++17, PyTorch) to ensure the generated code is compatible with the specified version.
+
+- **Function and Object Names:**
+
+  - Check the names of functions and the keys for dictionary/map objects. Ensure they actually exist. You can find evidence from existing code or online resources.
+
+- **Latest Guidelines:**
+
+  - Find online guides or tutorials about the latest version of a specific library or how to use it.
+
+- **Logic Compatibility:**
+
+  - Always check whether the newly generated code will break the logic that already exists in the code.
+
+- **Conflict Handling:**
+
+  - **Note:** The existing code might be wrong (e.g., I haven't fixed it, or it's a TODO). If the newly generated code conflicts with the old code, **do not fix the old code directly**; instead, **ask me what to do**.
+
+- **Documentation Alignment:**
+
+  - Ensure the code aligns with any `readme.md` or other kinds of documentation.
+  
+  - New requests may or should change the descriptions in `.md` files as well. If there is a conflict, **ask me what to do**.
+
+- **Complex Task Management:**
+
+  - For a complex task, **do not change the code directly**.
+  
+  - **Break the task down into several steps** and let me confirm your intended changes before you actually implement the code modification.
+
+## File reading and code search
+
+When you need to inspect file contents or search through the codebase in this repository:
+
+1. Prefer Cursor internal tools instead of shell commands:
+   - Use: read_file, codebase_search, grep_search, file_search, list_dir.
+
+2. Do NOT use shell commands to read or search files:
+   - Do not use: cat, head, tail, less, more, sed, awk, grep, find, ls, etc. to "look at file contents".
+   - Do not generate such commands unless I explicitly ask you to "write a shell command".
+
+3. If read_file, grep_search, or other internal tools are unavailable or fail:
+   - Explain the error to me.
+   - Do NOT silently fall back to run_terminal_command or any shell commands.
+
+## Text processing and filtering
+
+When you need to filter, transform, or extract information from text:
+
+1. First fetch the relevant text using read_file or grep_search.
+
+2. Perform the processing in your own reasoning instead of relying on shell tools
+   such as sed, awk, cut, tr, sort, uniq, etc.
+
+3. If you need to propose an automated solution:
+   - Prefer code snippets in the project's main programming language
+     (for example: Python, TypeScript, C#, etc.)
+   - Only suggest shell scripts when I explicitly request a shell-based solution.

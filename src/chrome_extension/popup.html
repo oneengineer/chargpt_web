@@ -1,0 +1,72 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="wrap">
+    <div class="h1">ChatGPT Bridge (Manual)</div>
+
+    <div class="card">
+      <div class="row">
+        <label>WS URL</label>
+        <input id="url" placeholder="ws://127.0.0.1:17321" />
+      </div>
+      <div class="row">
+        <button id="save">Save + Connect</button>
+        <button id="connect">Connect</button>
+      </div>
+      <div id="status" class="status">Status: -</div>
+      <div id="error" class="error"></div>
+      <div class="hint">Connection is maintained in an offscreen document to reduce MV3 sleep disconnects.</div>
+    </div>
+
+    <div class="card">
+      <div class="h2">Manual Fetch</div>
+      <button id="captureSelection">Capture Selection → VS Code</button>
+      <button id="captureLastAssistant">Capture Last Assistant → VS Code</button>
+      <button id="pickMessage">Pick a Message Bubble → VS Code</button>
+      <button id="sendUrl">Send Page URL → VS Code</button>
+      <div class="row">
+        <textarea id="sendText" rows="4" placeholder="Paste any chat snippet or link, then send"></textarea>
+      </div>
+      <button id="sendTextBtn">Send Text → VS Code</button>
+    </div>
+
+    <div class="card">
+      <div class="h2">Manual Push</div>
+      <div class="small">Latest from VS Code:</div>
+      <textarea id="fromVscode" rows="5" readonly></textarea>
+      <div class="row">
+        <button id="copyFromVscode">Copy</button>
+        <button id="insertToChat">Insert into ChatGPT input</button>
+      </div>
+      <div class="hint">Insert does not click Send. You press Enter yourself.</div>
+    </div>
+
+    <div class="card">
+      <div class="h2">Upload Artifacts (VS Code → ChatGPT)</div>
+      <div class="hint">Artifacts are single files exposed from VS Code over localhost (e.g. bundle.md or a ZIP). Select one or more and upload into ChatGPT. Chat limit: 10 files per chat. Project limit: 20 files per project.</div>
+
+      <div class="row">
+        <button id="refreshArtifacts">Refresh</button>
+        <button id="clearArtifacts">Clear List</button>
+      </div>
+
+      <div id="artifactList" class="artifactList"></div>
+
+      <div class="row">
+        <button id="uploadToChat">Upload to Chat (batch=10)</button>
+        <button id="uploadToProject">Upload to Project (batch=20)</button>
+      </div>
+
+      <div id="uploadStatus" class="status">Upload: -</div>
+      <div class="hint">For Project upload, open the Project → Files upload dialog first. The extension will only drop files; it will not click UI buttons for you.</div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

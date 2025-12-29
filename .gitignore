@@ -1,0 +1,40 @@
+# OS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Node / package managers
+node_modules/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# VS Code extension artifacts
+src/vscode_extension/out/
+src/vscode_extension/.vscode-test/
+*.vsix
+
+# Editor configs (keep common shared VS Code configs)
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+
+# JetBrains
+.idea/
+
+

@@ -1,0 +1,173 @@
+{
+  "name": "chatgpt-web-bridge-src",
+  "displayName": "ChatGPT Web Bridge (Manual, Offscreen)",
+  "description": "Manual bridge between Chrome and VS Code + task state machine + bundler + ZIP import.",
+  "version": "0.5.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:chatgptBridge.startServer",
+    "onCommand:chatgptBridge.stopServer",
+    "onCommand:chatgptBridge.openPanel",
+    "onCommand:chatgptBridge.openLogs",
+    "onCommand:chatgptBridge.sendFilesToChrome",
+    "onCommand:chatgptBridge.bundleWorkspace",
+    "onCommand:chatgptBridge.publishFileAsArtifact",
+    "onCommand:chatgptBridge.downloadZipFromUrl",
+    "onCommand:chatgptBridge.importLocalZip"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "chatgptBridge.startServer",
+        "title": "ChatGPT Bridge: Start Local Bridge Server"
+      },
+      {
+        "command": "chatgptBridge.stopServer",
+        "title": "ChatGPT Bridge: Stop Local Bridge Server"
+      },
+      {
+        "command": "chatgptBridge.openPanel",
+        "title": "ChatGPT Bridge: Open Bridge Panel"
+      },
+      {
+        "command": "chatgptBridge.openLogs",
+        "title": "ChatGPT Bridge: Open Output Logs"
+      },
+      {
+        "command": "chatgptBridge.sendFilesToChrome",
+        "title": "ChatGPT Bridge: Send Files to Target ChatGPT Tab"
+      },
+      {
+        "command": "chatgptBridge.bundleWorkspace",
+        "title": "ChatGPT Bridge: Bundle Code (for Manual Upload)"
+      },
+      {
+        "command": "chatgptBridge.publishFileAsArtifact",
+        "title": "ChatGPT Bridge: Publish a File as Upload Artifact (Chrome)"
+      },
+      {
+        "command": "chatgptBridge.downloadZipFromUrl",
+        "title": "ChatGPT Bridge: Download ZIP from URL and Open"
+      },
+      {
+        "command": "chatgptBridge.importLocalZip",
+        "title": "ChatGPT Bridge: Import Local ZIP and Open"
+      }
+    ],
+    "configuration": {
+      "title": "ChatGPT Web Bridge",
+      "properties": {
+        "chatgptBridge.logLevel": {
+          "type": "string",
+          "default": "info",
+          "enum": ["error", "warn", "info", "debug"],
+          "description": "Logging verbosity for the VS Code extension output channel."
+        },
+        "chatgptBridge.showNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show VS Code notifications for important events (errors/warnings)."
+        },
+        "chatgptBridge.autoUploadTargetUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Default ChatGPT project entry URL used by Send Files (auto tab routing)."
+        },
+        "chatgptBridge.port": {
+          "type": "number",
+          "default": 17321,
+          "description": "Localhost port for the bridge server."
+        },
+        "chatgptBridge.artifactPort": {
+          "type": "number",
+          "default": 17322,
+          "description": "Localhost port for the artifact HTTP server (Chrome fetches upload artifacts from here)."
+        },
+        "chatgptBridge.autoOfferZipDownload": {
+          "type": "boolean",
+          "default": true,
+          "description": "When incoming text contains a .zip URL, offer to download and open."
+        },
+        "chatgptBridge.bundleMode": {
+          "type": "string",
+          "default": "workspace",
+          "enum": ["workspace", "openFiles", "currentFile"],
+          "description": "Default bundling mode."
+        },
+        "chatgptBridge.bundleExcludeGlobs": {
+          "type": "array",
+          "default": [
+            "**/.git/**",
+            "**/Library/**",
+            "**/Temp/**",
+            "**/Obj/**",
+            "**/Build/**",
+            "**/Builds/**",
+            "**/node_modules/**",
+            "**/.chatgpt-bridge/**",
+            "**/.vs/**",
+            "**/.idea/**"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Globs excluded from bundling."
+        },
+        "chatgptBridge.bundleIncludeExts": {
+          "type": "array",
+          "default": [
+            ".cs",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".json",
+            ".md",
+            ".txt",
+            ".shader",
+            ".cginc",
+            ".h",
+            ".hpp",
+            ".cpp",
+            ".c"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "File extensions included in bundling."
+        },
+        "chatgptBridge.bundleMaxFileBytes": {
+          "type": "number",
+          "default": 400000,
+          "description": "Skip files bigger than this when bundling (bytes)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "node -e \"console.log('lint skipped')\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/vscode": "^1.92.0",
+    "typescript": "^5.5.4",
+    "@types/ws": "^8.5.12",
+    "@types/archiver": "^6.0.2"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "archiver": "^7.0.1",
+    "extract-zip": "^2.0.1"
+  }
+}
+
+
