@@ -111,6 +111,20 @@ $("sendUrl").addEventListener("click", async () => {
   $("error").textContent = resp?.ok ? "Sent URL." : "Failed to send URL.";
 });
 
+$("copyPageHtml").addEventListener("click", async () => {
+  const resp = await chrome.runtime.sendMessage({ type: "copyPageHtml" });
+  if (!resp?.ok) {
+    $("error").textContent = resp?.error || "Failed to get page HTML.";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(resp.html);
+    $("error").textContent = `Copied page HTML (${resp.html.length} chars).`;
+  } catch (e) {
+    $("error").textContent = "Clipboard write failed: " + String(e);
+  }
+});
+
 $("sendTextBtn").addEventListener("click", async () => {
   const tab = await getActiveTab();
   const text = $("sendText").value || "";

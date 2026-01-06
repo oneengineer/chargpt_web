@@ -70,6 +70,59 @@ function getPageState() {
   };
 }
 
+// --- Error backhaul (errors only, no message text/DOM) ---
+let __bridgeErrWindowStart = Date.now();
+let __bridgeErrCount = 0;
+const __bridgeErrLast = new Map();
+
+function __bridgeShouldSend(where, phase, message) {
+  const now = Date.now();
+  if (now - __bridgeErrWindowStart > 60000) {
+    __bridgeErrWindowStart = now;
+    __bridgeErrCount = 0;
+  }
+  if (__bridgeErrCount >= 20) return false;
+  const key = `${where}|${phase}|${message}`;
+  const last = __bridgeErrLast.get(key) || 0;
+  if (now - last < 5000) return false;
+  __bridgeErrLast.set(key, now);
+  __bridgeErrCount++;
+  return true;
+}
+
+function __bridgeEmitError(where, phase, err, extra) {
+  try {
+    const message = String(err?.message || err || "error");
+    if (!__bridgeShouldSend(where, phase, message)) return;
+    const stack = String(err?.stack || "").slice(0, 4000);
+    const ps = getPageState();
+    chrome.runtime.sendMessage({
+      type: "bridge_error",
+      where,
+      phase,
+      message,
+      detail: {
+        url: ps.url,
+        tabUrl: ps.url,
+        stack,
+        pageState: { composer: ps.composer, fileInputs: ps.fileInputs, sendBtns: ps.sendBtns, loginDetected: ps.loginDetected },
+        ...(extra && typeof extra === "object" ? extra : {})
+      }
+    }).catch(() => {});
+  } catch {}
+}
+
+// Global guards for uncaught exceptions / unhandled promise rejections.
+try {
+  window.addEventListener("error", (e) => {
+    __bridgeEmitError("content", "unknown", e?.error || new Error(String(e?.message || "uncaught error")), {});
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const reason = e?.reason instanceof Error ? e.reason : new Error(String(e?.reason || "unhandledrejection"));
+    __bridgeEmitError("content", "unknown", reason, { kind: "unhandledrejection" });
+  });
+} catch {}
+
 function extractMessageText(msgEl) {
   if (!msgEl) return '';
 
@@ -90,6 +143,65 @@ function extractMessageText(msgEl) {
 
   return (msgEl.innerText || msgEl.textContent || '').trim();
 }
+
+function getConversationIdFromLocation() {
+  const m = location.pathname.match(/\/c\/([^\/?#]+)/);
+  return m ? m[1] : "";
+}
+
+function startChatMirror() {
+  const root = getThreadRoot();
+  if (!root) {
+    __bridgeEmitError("content", "mirror", new Error("Thread root not found."), {});
+    return;
+  }
+
+  const seen = new WeakSet();
+
+  function scanAndEmit() {
+    try {
+      const nodes = Array.from(root.querySelectorAll('[data-message-author-role]')).filter(isVisible);
+      for (const el of nodes) {
+        if (seen.has(el)) continue;
+        const role = el.getAttribute('data-message-author-role');
+        if (role !== 'assistant' && role !== 'user') continue;
+        const text = extractMessageText(el);
+        seen.add(el);
+        if (!text) continue;
+        try {
+          chrome.runtime.sendMessage({
+            type: "chat_message",
+            role,
+            text,
+            url: location.href,
+            conversationId: getConversationIdFromLocation()
+          }).catch(() => {});
+        } catch {}
+      }
+    } catch (e) {
+      __bridgeEmitError("content", "mirror", e, {});
+    }
+  }
+
+  // Initial scan
+  scanAndEmit();
+
+  const obs = new MutationObserver(() => {
+    try {
+      clearTimeout(obs.__t);
+      obs.__t = setTimeout(scanAndEmit, 120);
+    } catch (e) {
+      __bridgeEmitError("content", "mirror", e, {});
+    }
+  });
+  try {
+    obs.observe(root, { childList: true, subtree: true });
+  } catch (e) {
+    __bridgeEmitError("content", "mirror", e, {});
+  }
+}
+
+try { startChatMirror(); } catch {}
 
 function findLastAssistantText() {
   const root = getThreadRoot();
@@ -249,6 +361,63 @@ function insertIntoComposer(text, sendResponse) {
   } catch (e) {
     sendResponse({ ok: false, error: String(e) });
   }
+}
+
+async function insertAndSend(text, expectedConversationId) {
+  const t = String(text || "");
+  if (!t.trim()) throw new Error("Empty text.");
+
+  const expected = String(expectedConversationId || "");
+  if (expected) {
+    const m = location.pathname.match(/\/c\/([^\/]+)/);
+    const actual = m ? m[1] : "";
+    if (actual && actual !== expected) {
+      throw new Error(`Conversation mismatch. Expected ${expected} but page is ${actual}.`);
+    }
+  }
+
+  const comp = findComposer();
+  if (!comp) throw new Error("Composer input not found.");
+
+  if (comp.type === 'textarea') {
+    const ta = comp.el;
+    ta.focus();
+    ta.value = t;
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  } else {
+    const ed = comp.el;
+    ed.focus();
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(ed);
+      sel.removeAllRanges();
+      sel.addRange(range);
+
+      document.execCommand('insertText', false, t);
+      ed.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    } catch {
+      ed.textContent = t;
+      ed.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+
+  // Wait briefly for send button to become enabled, then click it.
+  let btn = null;
+  for (let i = 0; i < 20; i++) {
+    btn = findSendButton();
+    if (btn && isVisible(btn)) {
+      const disabled = !!btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+      if (!disabled) break;
+    }
+    await sleep(100);
+  }
+  btn = findSendButton();
+  if (!btn || !isVisible(btn)) throw new Error("Send button not found.");
+  if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') throw new Error("Send button is disabled.");
+
+  btn.click();
+  return true;
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -423,6 +592,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'getOuterHtml') {
+    const html = document.documentElement.outerHTML;
+    sendResponse({ ok: true, html });
+    return true;
+  }
+
   if (msg.type === 'pickMessage') {
     startPickMode(sendResponse);
     return true;
@@ -430,6 +605,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'insertIntoComposer') {
     insertIntoComposer(String(msg.text || ''), sendResponse);
+    return true;
+  }
+
+  if (msg.type === 'insertAndSend') {
+    (async () => {
+      try {
+        const expected = String(msg.expectedConversationId || "");
+        await insertAndSend(String(msg.text || ""), expected);
+        sendResponse({ ok: true });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e), debug: getPageState() });
+      }
+    })();
     return true;
   }
 

@@ -35,12 +35,15 @@ export interface TargetSpec {
   conversationId?: string;
 }
 
-export type BrowserEventKind = "conversation_bound" | "tab_closed" | "error";
+export type BrowserEventKind = "conversation_bound" | "tab_closed" | "error" | "chat_message" | "upload_done" | "upload_failed";
 
 export type BridgeBrowserEvent =
   | { type: "browser_event"; kind: "conversation_bound"; sessionId: string; conversationId: string; url: string; ts?: number }
   | { type: "browser_event"; kind: "tab_closed"; sessionId?: string; url?: string; ts?: number }
-  | { type: "browser_event"; kind: "error"; message: string; detail?: any; ts?: number };
+  | { type: "browser_event"; kind: "error"; message: string; detail?: any; ts?: number }
+  | { type: "browser_event"; kind: "chat_message"; sessionId?: string; role: "user" | "assistant"; text: string; url?: string; conversationId?: string; ts?: number }
+  | { type: "browser_event"; kind: "upload_done"; sessionId?: string; target: UploadTarget; uploaded: number; url?: string; ts?: number }
+  | { type: "browser_event"; kind: "upload_failed"; sessionId?: string; target: UploadTarget; error: string; url?: string; ts?: number };
 
 export type BridgeInbound =
   | { type: "browser_payload"; kind: BrowserPayloadKind; data: string; page?: { url?: string; title?: string }; ts?: number }
@@ -50,6 +53,7 @@ export type BridgeInbound =
 export type BridgeOutbound =
   | { type: "pong" }
   | { type: "vscode_push"; kind: "text"; text: string; ts: number }
+  | { type: "vscode_push"; kind: "insert_and_send"; text: string; target: TargetSpec; ts: number }
   | { type: "vscode_push"; kind: "files"; files: UploadFileRef[]; uploadTarget?: UploadTarget; target?: TargetSpec; ts: number }
   | { type: "vscode_push"; kind: "session_open"; target: TargetSpec; ts: number }
   | { type: "vscode_push"; kind: "session_close"; target: TargetSpec; ts: number }
@@ -90,6 +94,15 @@ export interface PersistedState {
   activeSessionId?: string;
   lastTargetUrl?: string;
   messages: Array<{ direction: "from_browser" | "to_browser"; kind: string; data: string; ts: number; page?: { url?: string; title?: string } }>;
+  /**
+   * Per-session chat transcript mirrored from ChatGPT DOM (best-effort).
+   * New versions append to this; older persisted states won't have it.
+   */
+  chatThreads?: Record<string, Array<{ role: "user" | "assistant"; text: string; ts: number; url?: string; conversationId?: string }>>;
+  /**
+   * If a chat_send included attachments, we wait for upload_done then send the text.
+   */
+  pendingSend?: Record<string, { text: string; createdAt: number }>;
 }
 
 

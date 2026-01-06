@@ -89,7 +89,9 @@ function defaultState(): PersistedState {
     token: crypto.randomBytes(16).toString("hex"),
     tasks: [],
     sessions: [],
-    messages: []
+    messages: [],
+    chatThreads: {},
+    pendingSend: {}
   };
 }
 
@@ -100,6 +102,8 @@ function loadState(ctx: vscode.ExtensionContext): PersistedState {
   // Backward-compat for older versions.
   if (!Array.isArray((s as any).sessions)) (s as any).sessions = [];
   if (!Array.isArray((s as any).messages)) (s as any).messages = [];
+  if (!(s as any).chatThreads || typeof (s as any).chatThreads !== "object") (s as any).chatThreads = {};
+  if (!(s as any).pendingSend || typeof (s as any).pendingSend !== "object") (s as any).pendingSend = {};
   return s;
 }
 
@@ -212,9 +216,7 @@ export function activate(ctx: vscode.ExtensionContext) {
     return false;
   };
 
-  const ensurePanel = () => {
-    if (!panel) {
-      panel = new BridgePanel(ctx, async (msg) => {
+  const onMessageFromUI = async (msg: any) => {
         if (msg?.type === "ui_ready") {
           pushStateToPanel();
           return;
@@ -226,9 +228,98 @@ export function activate(ctx: vscode.ExtensionContext) {
           return;
         }
 
+        if (msg?.type === "pick_files") {
+          const sid = String(msg.id ?? "");
+          if (!sid) return;
+          const picks = await vscode.window.showOpenDialog({ canSelectMany: true, canSelectFiles: true, canSelectFolders: false });
+          if (!picks || picks.length === 0) return;
+          panel?.postMessage({ type: "files_picked", id: sid, files: picks.map((u) => u.fsPath) });
+          return;
+        }
+
         if (msg?.type === "session_select") {
           const sid = String(msg.id ?? "");
           await setActiveSession(sid || undefined);
+          return;
+        }
+
+        if (msg?.type === "session_activate") {
+          const sid = String(msg.id ?? "");
+          if (!sid) return;
+          const s = getSession(sid);
+          if (!s) return;
+          await setActiveSession(sid);
+          s.lastUsedAt = Date.now();
+          await saveState(ctx, state);
+          pushStateToPanel();
+          return;
+        }
+
+        if (msg?.type === "session_new_empty") {
+          // Create a session tab without URL first (user can Set URL later in the Chat tab).
+          const now = Date.now();
+          const idx = (state.sessions?.length ?? 0) + 1;
+          const s: SessionInfo = {
+            id: crypto.randomBytes(8).toString("hex"),
+            name: `Chat ${idx}`,
+            projectUrl: "",
+            projectId: undefined,
+            conversationId: undefined,
+            createdAt: now,
+            lastUsedAt: now
+          };
+          state.sessions.unshift(s);
+          state.activeSessionId = s.id;
+          await saveState(ctx, state);
+          pushStateToPanel();
+          return;
+        }
+
+        if (msg?.type === "session_set_url") {
+          const sid = String(msg.id ?? "");
+          const urlRaw = String(msg.url ?? "").trim();
+          if (!sid || !urlRaw) return;
+          const s = getSession(sid);
+          if (!s) return;
+
+          const url = stripUrlNoise(urlRaw);
+          s.projectUrl = url;
+          s.projectId = extractProjectId(url);
+          s.conversationId = extractConversationId(url) || s.conversationId;
+          s.lastUsedAt = Date.now();
+          state.lastTargetUrl = url;
+
+          const cfg = vscode.workspace.getConfiguration("chatgptBridge");
+          await cfg.update("autoUploadTargetUrl", url, vscode.ConfigurationTarget.Global);
+
+          await saveState(ctx, state);
+          pushStateToPanel();
+          return;
+        }
+
+        if (msg?.type === "chat_send") {
+          const sid = String(msg.id ?? "");
+          const text = String(msg.text ?? "");
+          const attachments = Array.isArray(msg.attachments) ? msg.attachments.map((x: any) => String(x || "")).filter(Boolean) : [];
+          if (!sid || (!text.trim() && attachments.length === 0)) return;
+
+          const s = getSession(sid) || getActiveSession();
+          if (!s) return;
+
+          // If attachments exist, upload them first (Chat attachments), then send text after upload_done.
+          if (attachments.length > 0) {
+            const uris = attachments.map((p: string) => vscode.Uri.file(p));
+            state.pendingSend = state.pendingSend || {};
+            state.pendingSend[sid] = { text: String(text || ""), createdAt: Date.now() };
+            await saveState(ctx, state);
+            pushStateToPanel();
+            await openSessionInBrowser(s);
+            await sendSpecificFilesToBrowser(s, "chat", uris);
+            return;
+          }
+
+          if (!text.trim()) return;
+          await insertAndSendToSession(sid, text);
           return;
         }
 
@@ -344,13 +435,17 @@ export function activate(ctx: vscode.ExtensionContext) {
           pushStateToPanel();
           return;
         }
-      });
+  };
+
+  const ensurePanel = () => {
+    if (!panel) {
+      panel = new BridgePanel(ctx, onMessageFromUI);
     }
     panel.show("ChatGPT Bridge");
   };
 
   const pushStateToPanel = () => {
-    panel?.postMessage({
+    const msg = {
       type: "state",
       port: server?.getPort() ?? getPort(),
       clients: server?.getClientCount() ?? 0,
@@ -359,8 +454,10 @@ export function activate(ctx: vscode.ExtensionContext) {
       sessions: state.sessions,
       activeSessionId: state.activeSessionId,
       lastTargetUrl: state.lastTargetUrl,
-      messages: state.messages
-    });
+      messages: state.messages,
+      chatThreads: state.chatThreads ?? {}
+    };
+    panel?.postMessage(msg);
   };
 
   const ensureHasSession = () => {
@@ -448,13 +545,10 @@ export function activate(ctx: vscode.ExtensionContext) {
     return refs;
   };
 
-  const sendFilesToBrowser = async (session: SessionInfo, uploadTarget: UploadTarget) => {
+  const sendSpecificFilesToBrowser = async (session: SessionInfo, uploadTarget: UploadTarget, picks: vscode.Uri[]) => {
     ensureServer();
     ensureArtifactServer();
     if (!(await ensureChromeClient(`Send Files (${uploadTarget})`))) return;
-
-    const picks = await vscode.window.showOpenDialog({ canSelectMany: true, canSelectFiles: true, canSelectFolders: false });
-    if (!picks || picks.length === 0) return;
 
     // Guard: per-file size < 10MB by default (ChatGPT UI may be higher, but keep safe).
     const MAX = 10 * 1024 * 1024;
@@ -487,6 +581,12 @@ export function activate(ctx: vscode.ExtensionContext) {
     state.lastTargetUrl = session.projectUrl;
     await saveState(ctx, state);
     pushStateToPanel();
+  };
+
+  const sendFilesToBrowser = async (session: SessionInfo, uploadTarget: UploadTarget) => {
+    const picks = await vscode.window.showOpenDialog({ canSelectMany: true, canSelectFiles: true, canSelectFolders: false });
+    if (!picks || picks.length === 0) return;
+    await sendSpecificFilesToBrowser(session, uploadTarget, picks);
   };
 
   const ensureServer = () => {
@@ -535,6 +635,20 @@ export function activate(ctx: vscode.ExtensionContext) {
         }
 
         if (msg.type === "browser_event") {
+          const errorData =
+            msg.kind === "error"
+              ? (() => {
+                const m = String((msg as any).message || "error");
+                const detail = (msg as any).detail;
+                if (detail === undefined) return m;
+                try {
+                  return m + "\n" + compactText(JSON.stringify(detail, null, 2), 4000);
+                } catch {
+                  return m + "\n" + compactText(String(detail), 4000);
+                }
+              })()
+              : undefined;
+
           // Keep a compact log entry.
           state.messages.push({
             direction: "from_browser" as const,
@@ -543,7 +657,7 @@ export function activate(ctx: vscode.ExtensionContext) {
               msg.kind === "conversation_bound"
                 ? `session=${msg.sessionId} conversation=${msg.conversationId}`
                 : msg.kind === "error"
-                  ? String((msg as any).message || "error")
+                  ? (errorData ?? String((msg as any).message || "error"))
                   : "tab_closed",
             ts: msg.ts ?? now
           });
@@ -558,16 +672,67 @@ export function activate(ctx: vscode.ExtensionContext) {
             }
           }
 
+          if (msg.kind === "chat_message") {
+            const sid = (msg as any).sessionId ? String((msg as any).sessionId) : undefined;
+            const role = (msg as any).role === "assistant" ? "assistant" : "user";
+            const text = String((msg as any).text || "");
+            const url = String((msg as any).url || "");
+            const conversationId = String((msg as any).conversationId || "");
+
+            if (sid && text) {
+              state.chatThreads = state.chatThreads || {};
+              const arr = state.chatThreads[sid] || (state.chatThreads[sid] = []);
+
+              // De-dupe by last entry to avoid MutationObserver duplicate fires.
+              const last = arr[arr.length - 1];
+              if (!last || last.role !== role || last.text !== text) {
+                arr.push({ role, text, ts: msg.ts ?? now, url: url || undefined, conversationId: conversationId || undefined });
+                if (arr.length > 500) arr.shift();
+              }
+            }
+          }
+
+          if (msg.kind === "upload_done") {
+            const sid = (msg as any).sessionId ? String((msg as any).sessionId) : undefined;
+            const pending = sid ? state.pendingSend?.[sid] : undefined;
+            if (sid && pending && pending.text && pending.text.trim()) {
+              // Clear pending first to avoid double-send if Chrome emits twice.
+              delete (state.pendingSend as any)[sid];
+              await saveState(ctx, state);
+              pushStateToPanel();
+              await insertAndSendToSession(sid, pending.text);
+            }
+          }
+
+          if (msg.kind === "upload_failed") {
+            const sid = (msg as any).sessionId ? String((msg as any).sessionId) : undefined;
+            if (sid && state.pendingSend?.[sid]) {
+              delete (state.pendingSend as any)[sid];
+            }
+          }
+
           if (msg.kind === "error") {
-            log("error", "Chrome reported an error.", msg);
+            const m = String((msg as any).message || "Chrome error");
+            const d = (msg as any).detail || {};
+            const where = typeof d.where === "string" ? d.where : "chrome";
+            const phase = typeof d.phase === "string" ? d.phase : "unknown";
+            const url = typeof d.url === "string" ? d.url : (typeof (msg as any).url === "string" ? (msg as any).url : "");
+            const tabId = d.tabId != null ? String(d.tabId) : "";
+            const sid = typeof d.sessionId === "string" ? d.sessionId : (typeof (msg as any).sessionId === "string" ? (msg as any).sessionId : "");
+            const prefix = `Chrome error (${where}/${phase})`;
+            const meta = [sid ? `session=${sid}` : "", tabId ? `tab=${tabId}` : "", url ? `url=${url}` : ""].filter(Boolean).join(" ");
+            log("error", `${prefix}: ${m}${meta ? " • " + meta : ""}`, msg);
             if (shouldNotify()) {
-              const m = String((msg as any).message || "Chrome error");
               vscode.window.showErrorMessage(`ChatGPT Bridge (Chrome): ${m}`);
             }
           } else if (msg.kind === "tab_closed") {
             log("warn", "Chrome reported: target tab closed.", msg);
           } else if (msg.kind === "conversation_bound") {
             log("info", "Conversation bound.", msg);
+          } else if (msg.kind === "upload_done") {
+            log("info", "Chrome reported: upload done.", msg);
+          } else if (msg.kind === "upload_failed") {
+            log("error", "Chrome reported: upload failed.", msg);
           }
 
           await saveState(ctx, state);
@@ -632,6 +797,37 @@ export function activate(ctx: vscode.ExtensionContext) {
     await saveState(ctx, state);
     pushStateToPanel();
   };
+
+  async function insertAndSendToSession(sessionId: string, text: string) {
+    ensureServer();
+    if (!(await ensureChromeClient("Insert+Send"))) return;
+    const s = getSession(sessionId) || getActiveSession();
+    if (!s) {
+      vscode.window.showErrorMessage("No session selected.");
+      return;
+    }
+    if (!String(s.projectUrl || "").trim()) {
+      vscode.window.showErrorMessage("This chat tab has no ChatGPT URL yet. Click 'Set URL' in the chat tab first.");
+      return;
+    }
+
+    // Ensure a tab exists / is routed for this session (Option 2: first click opens it, but we re-ensure here).
+    await openSessionInBrowser(s);
+
+    const target: TargetSpec = {
+      url: s.projectUrl,
+      sessionId: s.id,
+      projectId: s.projectId,
+      conversationId: s.conversationId
+    };
+
+    server!.broadcast({ type: "vscode_push", kind: "insert_and_send", text, target, ts: Date.now() });
+    state.messages.push({ direction: "to_browser", kind: "insert_and_send", data: compactText(text), ts: Date.now(), page: { url: s.projectUrl, title: "" } });
+    if (state.messages.length > 200) state.messages.shift();
+    s.lastUsedAt = Date.now();
+    await saveState(ctx, state);
+    pushStateToPanel();
+  }
 
   const offerPromptActions = async (prompt: string) => {
     const choice = await vscode.window.showInformationMessage("Next task prompt is ready.", "Copy Prompt", "Send to Chrome", "Dismiss");

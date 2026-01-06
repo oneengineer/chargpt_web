@@ -7,6 +7,40 @@ let state = {
   upload: { active: false, target: "", statusText: "" }
 };
 
+// --- Error backhaul (errors only, no message text/DOM) ---
+let __errWindowStart = Date.now();
+let __errCount = 0;
+const __errLast = new Map();
+
+function __shouldSendErr(where, phase, message) {
+  const now = Date.now();
+  if (now - __errWindowStart > 60000) {
+    __errWindowStart = now;
+    __errCount = 0;
+  }
+  if (__errCount >= 20) return false;
+  const key = `${where}|${phase}|${message}`;
+  const last = __errLast.get(key) || 0;
+  if (now - last < 5000) return false;
+  __errLast.set(key, now);
+  __errCount++;
+  return true;
+}
+
+async function __emitError(where, phase, message, detail) {
+  try {
+    const msg = String(message || "Chrome error");
+    if (!__shouldSendErr(where, phase, msg)) return;
+    await emitBrowserEvent({
+      type: "browser_event",
+      kind: "error",
+      message: msg,
+      detail: { where, phase, ...(detail && typeof detail === "object" ? detail : {}) },
+      ts: Date.now()
+    });
+  } catch {}
+}
+
 let creatingOffscreen = null;
 
 async function load() {
@@ -82,24 +116,42 @@ async function ensureOffscreen() {
     justification: "Maintain WebSocket connection to VS Code for manual ChatGPT page content capture and message insertion."
   });
 
-  await creatingOffscreen;
+  try {
+    await creatingOffscreen;
+  } catch (e) {
+    await __emitError("background", "ws_connect", "Failed to create offscreen document.", { error: String(e) });
+    throw e;
+  }
   creatingOffscreen = null;
 }
 
 async function offscreenConnect() {
-  await ensureOffscreen();
+  try {
+    await ensureOffscreen();
+  } catch (e) {
+    state.connected = false;
+    state.lastError = "Failed to create offscreen.";
+    notifyStatus();
+    return;
+  }
   const resp = await chrome.runtime.sendMessage({ type: "offscreen_connect", url: state.url }).catch((e) => ({ ok: false, error: String(e) }));
   if (!resp?.ok) {
     state.connected = false;
     state.lastError = resp?.error || "Failed to connect offscreen.";
     notifyStatus();
+    await __emitError("background", "ws_connect", "Failed to connect offscreen.", { error: state.lastError });
   }
 }
 
 async function offscreenSend(kind, data, page) {
-  await ensureOffscreen();
+  try {
+    await ensureOffscreen();
+  } catch {
+    return { ok: false, error: "Offscreen not available." };
+  }
   const resp = await chrome.runtime.sendMessage({ type: "offscreen_send", kind, data, page }).catch((e) => ({ ok: false, error: String(e) }));
   if (!resp?.ok) {
+    await __emitError("background", "ws_connect", "offscreen_send failed.", { error: resp?.error || "Not connected." });
     return { ok: false, error: resp?.error || "Not connected." };
   }
   return { ok: true };
@@ -426,13 +478,63 @@ async function handleFromVscodeFiles(payload) {
 
     if (!resp?.ok) {
       await emitBrowserEvent({ type: "browser_event", kind: "error", message: resp?.error || "Upload failed.", detail: { tabId: tab.id, url: tab.url, debug: resp?.debug }, ts: Date.now() });
+      await emitBrowserEvent({ type: "browser_event", kind: "upload_failed", sessionId, target: uploadTarget === "project" ? "project" : "chat", error: resp?.error || "Upload failed.", url: tab.url, ts: Date.now() });
       notifyUpload({ active: false, statusText: "Auto-upload failed." });
       return;
     }
   }
 
+  await emitBrowserEvent({ type: "browser_event", kind: "upload_done", sessionId, target: uploadTarget === "project" ? "project" : "chat", uploaded: files.length, url: tab.url, ts: Date.now() });
   notifyUpload({ active: false, statusText: `Auto-upload done (${files.length} files).` });
   showNotification("ChatGPT Bridge", `Auto-uploaded ${files.length} file(s) to ${uploadTarget}.`);
+}
+
+async function handleFromVscodeInsertAndSend(payload) {
+  const text = String(payload?.text || "");
+  const target = payload?.target || null;
+  const wantUrl = target?.url;
+  const sessionId = target?.sessionId || null;
+
+  if (!text.trim()) return;
+
+  let tab;
+  try {
+    tab = wantUrl ? await getOrCreateTargetTab(wantUrl, sessionId) : await getActiveTab();
+  } catch (e) {
+    await emitBrowserEvent({ type: "browser_event", kind: "error", message: "Failed to open/select target tab for insert+send.", detail: { error: String(e), wantUrl, sessionId }, ts: Date.now() });
+    return;
+  }
+
+  if (!tab?.id) {
+    await emitBrowserEvent({ type: "browser_event", kind: "error", message: "Target tab not found (insert+send).", detail: { wantUrl, sessionId }, ts: Date.now() });
+    return;
+  }
+
+  let ping;
+  try {
+    ping = await waitForInjectable(tab.id, 30000);
+  } catch (e) {
+    await emitBrowserEvent({ type: "browser_event", kind: "error", message: "Target tab not injectable (insert+send).", detail: { error: String(e), tabId: tab.id, url: tab.url }, ts: Date.now() });
+    return;
+  }
+
+  if (ping?.loginDetected) {
+    await emitBrowserEvent({ type: "browser_event", kind: "error", message: "Target tab looks like a login page. Please log in to ChatGPT in this Chrome profile.", detail: { url: ping.url || tab.url, pageState: ping }, ts: Date.now() });
+    return;
+  }
+
+  let resp;
+  try {
+    resp = await chrome.tabs.sendMessage(tab.id, { type: "insertAndSend", text, expectedConversationId: target?.conversationId || null });
+  } catch (e) {
+    await emitBrowserEvent({ type: "browser_event", kind: "error", message: "Insert+send message failed.", detail: { error: String(e), tabId: tab.id, url: tab.url }, ts: Date.now() });
+    return;
+  }
+
+  if (!resp?.ok) {
+    await emitBrowserEvent({ type: "browser_event", kind: "error", message: resp?.error || "Insert+send failed.", detail: { tabId: tab.id, url: tab.url, debug: resp?.debug }, ts: Date.now() });
+    return;
+  }
 }
 
 async function captureFromContent(tabId, msg) {
@@ -453,6 +555,22 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   offscreenConnect().catch(() => {});
 });
+
+// Service worker global guards.
+try {
+  self.addEventListener("error", (e) => {
+    __emitError("background", "unknown", "Service worker error.", {
+      error: String(e?.message || e),
+      stack: String(e?.error?.stack || "").slice(0, 4000)
+    });
+  });
+  self.addEventListener("unhandledrejection", (e) => {
+    const r = e?.reason;
+    const msg = r && r.message ? String(r.message) : String(r || "unhandledrejection");
+    const stack = String(r?.stack || "").slice(0, 4000);
+    __emitError("background", "unknown", "Service worker unhandledrejection: " + msg, { stack });
+  });
+} catch {}
 
 // Track /c/<conversationId> creation and keep session mappings in sync.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -480,6 +598,59 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // Messages coming back from offscreen.js
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Errors from content scripts (and other extension contexts).
+  if (message?.type === "bridge_error") {
+    const where = String(message.where || "content");
+    const phase = String(message.phase || "unknown");
+    const msg = String(message.message || "Chrome error");
+    const tabId = sender?.tab?.id;
+    const url = (message?.detail && message.detail.url) || sender?.tab?.url || "";
+    const stack = String(message?.detail?.stack || "").slice(0, 4000);
+    const pageState = message?.detail?.pageState || undefined;
+
+    (async () => {
+      try {
+        await ensureMappingsLoaded();
+        const sid = tabId != null ? (_tabToSession[String(tabId)] || null) : null;
+        await __emitError(where, phase, msg, { tabId, url, sessionId: sid || undefined, stack, pageState });
+      } catch (e) {
+        await __emitError("background", "unknown", "Failed to forward bridge_error.", { error: String(e), tabId, url });
+      }
+    })();
+
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  // ChatGPT DOM mirror messages from content scripts.
+  if (message?.type === "chat_message") {
+    const tabId = sender?.tab?.id;
+    const url = message?.url || sender?.tab?.url || "";
+    const role = message?.role === "assistant" ? "assistant" : "user";
+    const text = String(message?.text || "");
+    const conversationId = String(message?.conversationId || "");
+
+    if (tabId != null) {
+      ensureMappingsLoaded().then(() => {
+        const sid = _tabToSession[String(tabId)] || null;
+        emitBrowserEvent({
+          type: "browser_event",
+          kind: "chat_message",
+          sessionId: sid || undefined,
+          role,
+          text,
+          url,
+          conversationId: conversationId || undefined,
+          tabId,
+          ts: Date.now()
+        });
+      });
+    }
+
+    sendResponse({ ok: true });
+    return true;
+  }
+
   if (message?.type === "offscreen_message") {
     const data = message.data || {};
     if (data.type === "offscreen_status") {
@@ -498,6 +669,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (data.type === "from_vscode_files") {
       handleFromVscodeFiles(data.payload).catch((e) => {
         emitBrowserEvent({ type: "browser_event", kind: "error", message: "Unhandled error during auto-upload.", detail: { error: String(e) }, ts: Date.now() });
+      });
+      return;
+    }
+
+    if (data.type === "from_vscode_insert_and_send") {
+      handleFromVscodeInsertAndSend({ text: data.text || "", target: data.target || null }).catch((e) => {
+        emitBrowserEvent({ type: "browser_event", kind: "error", message: "Unhandled error during insert+send.", detail: { error: String(e) }, ts: Date.now() });
       });
       return;
     }
@@ -660,6 +838,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message?.type === "sendUrl") {
       const resp = await offscreenSend("url", message.url || "", { url: message.url, title: message.title });
+      sendResponse(resp);
+      return;
+    }
+
+    if (message?.type === "copyPageHtml") {
+      const tab = await getActiveTab();
+      if (!tab?.id) {
+        sendResponse({ ok: false, error: "No active tab." });
+        return;
+      }
+      const resp = await captureFromContent(tab.id, { type: "getOuterHtml" });
       sendResponse(resp);
       return;
     }

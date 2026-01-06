@@ -61,6 +61,20 @@ export class ArtifactServer {
         if (!req.url) { res.writeHead(400).end(); return; }
         const u = new URL(req.url, `http://${this.host}:${this.port}`);
 
+        // CORS: the Chrome content script fetches these URLs from pages like https://chatgpt.com.
+        // Without CORS headers, fetch() will fail with "TypeError: Failed to fetch".
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "*");
+        res.setHeader("Access-Control-Max-Age", "600");
+        res.setHeader("Cache-Control", "no-store");
+
+        if (req.method === "OPTIONS") {
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+
         if (u.pathname === "/health") {
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           res.end(JSON.stringify({ ok: true }));

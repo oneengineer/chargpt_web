@@ -5,6 +5,51 @@ let state = {
   lastError: ""
 };
 
+// --- Error backhaul (errors only, no message text/DOM) ---
+let __errWindowStart = Date.now();
+let __errCount = 0;
+const __errLast = new Map();
+const __queuedEvents = [];
+
+function __shouldSendErr(where, phase, message) {
+  const now = Date.now();
+  if (now - __errWindowStart > 60000) {
+    __errWindowStart = now;
+    __errCount = 0;
+  }
+  if (__errCount >= 20) return false;
+  const key = `${where}|${phase}|${message}`;
+  const last = __errLast.get(key) || 0;
+  if (now - last < 5000) return false;
+  __errLast.set(key, now);
+  __errCount++;
+  return true;
+}
+
+function __queueErrorEvent(where, phase, message, detail) {
+  try {
+    const msg = String(message || "Offscreen error");
+    if (!__shouldSendErr(where, phase, msg)) return;
+    const ev = {
+      type: "browser_event",
+      kind: "error",
+      message: msg,
+      detail: { where, phase, ...(detail && typeof detail === "object" ? detail : {}) },
+      ts: Date.now()
+    };
+    __queuedEvents.push(ev);
+    if (__queuedEvents.length > 50) __queuedEvents.shift();
+  } catch {}
+}
+
+function __flushQueuedEvents() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  while (__queuedEvents.length > 0) {
+    const ev = __queuedEvents.shift();
+    try { ws.send(JSON.stringify(ev)); } catch { break; }
+  }
+}
+
 // Upload artifacts received from VS Code.
 // Each artifact is a single file (could be .md/.txt/.zip/anything) available via a localhost URL.
 let artifacts = [];
@@ -47,6 +92,7 @@ function connect() {
     ws = new WebSocket(state.url);
   } catch (e) {
     setStatus(false, String(e));
+    __queueErrorEvent("offscreen", "ws_connect", "Failed to create WebSocket.", { error: String(e) });
     scheduleReconnect();
     return;
   }
@@ -55,6 +101,7 @@ function connect() {
     reconnectAttempts = 0;
     setStatus(true, "");
     try { ws.send(JSON.stringify({ type: "ping" })); } catch {}
+    __flushQueuedEvents();
   };
 
   ws.onmessage = (ev) => {
@@ -65,6 +112,11 @@ function connect() {
 
     if (msg.type === "vscode_push" && msg.kind === "text") {
       postToBackground({ type: "from_vscode", text: msg.text || "" });
+      return;
+    }
+
+    if (msg.type === "vscode_push" && msg.kind === "insert_and_send") {
+      postToBackground({ type: "from_vscode_insert_and_send", text: msg.text || "", target: msg.target || null });
       return;
     }
 
@@ -98,11 +150,13 @@ function connect() {
 
   ws.onclose = () => {
     setStatus(false, "Disconnected.");
+    __queueErrorEvent("offscreen", "ws_connect", "WebSocket closed.", { error: "Disconnected" });
     scheduleReconnect();
   };
 
   ws.onerror = () => {
     setStatus(false, "WebSocket error.");
+    __queueErrorEvent("offscreen", "ws_connect", "WebSocket error.", {});
     try { ws.close(); } catch {}
   };
 }
@@ -117,7 +171,10 @@ function scheduleReconnect() {
 }
 
 function sendPayloadToVscode(kind, data, page) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    __queueErrorEvent("offscreen", "ws_connect", "Dropped payload: websocket not open.", { payloadKind: String(kind || "") });
+    return false;
+  }
   try {
     ws.send(JSON.stringify({
       type: "browser_payload",
@@ -128,19 +185,37 @@ function sendPayloadToVscode(kind, data, page) {
     }));
     return true;
   } catch {
+    __queueErrorEvent("offscreen", "ws_connect", "Failed to send payload.", { payloadKind: String(kind || "") });
     return false;
   }
 }
 
 function sendEventToVscode(event) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    __queueErrorEvent("offscreen", "ws_connect", "Dropped event: websocket not open.", { eventType: String(event?.type || ""), eventKind: String(event?.kind || "") });
+    return false;
+  }
   try {
     ws.send(JSON.stringify(event));
     return true;
   } catch {
+    __queueErrorEvent("offscreen", "ws_connect", "Failed to send event.", { eventType: String(event?.type || ""), eventKind: String(event?.kind || "") });
     return false;
   }
 }
+
+// Offscreen global guards.
+try {
+  self.addEventListener("error", (e) => {
+    __queueErrorEvent("offscreen", "unknown", "Offscreen error.", { error: String(e?.message || e), stack: String(e?.error?.stack || "").slice(0, 4000) });
+  });
+  self.addEventListener("unhandledrejection", (e) => {
+    const r = e?.reason;
+    const msg = r && r.message ? String(r.message) : String(r || "unhandledrejection");
+    const stack = String(r?.stack || "").slice(0, 4000);
+    __queueErrorEvent("offscreen", "unknown", "Offscreen unhandledrejection: " + msg, { stack });
+  });
+} catch {}
 
 function parseConversationId(url) {
   try {
